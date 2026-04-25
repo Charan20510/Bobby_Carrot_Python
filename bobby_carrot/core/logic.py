@@ -209,7 +209,9 @@ def apply_landing(gs: GameState) -> Tuple[GameState, List[str]]:
     elif item == 27: gs.tiles[old_pos] = 24
     elif item == 28: gs.tiles[old_pos] = 29
     elif item == 29: gs.tiles[old_pos] = 28
-    elif item == 30: gs.tiles[old_pos] = 31   # crumble tile becomes deadly
+    elif item == 30:
+        gs.tiles[old_pos] = 31   # crumble tile becomes deadly
+        events.append("crumble_survived")
     elif item == 45:
         gs.tiles[old_pos] = 46
         gs.egg_count += 1
