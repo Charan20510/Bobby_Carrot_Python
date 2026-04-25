@@ -1,7 +1,7 @@
 """Pure-Python reimplementation of the Bobby Carrot game.
 
 Uses pygame for rendering and input.  Assets are located under
-`Game/assets/` (images, audio, and `.blm` map files).
+`assets/` (images, audio, and `.blm` map files).
 
 Run the game with:
     python -m bobby_carrot [map]
@@ -36,12 +36,24 @@ VIEW_WIDTH = 32 * VIEW_WIDTH_POINTS
 VIEW_HEIGHT = 32 * VIEW_HEIGHT_POINTS
 WIDTH_POINTS_DELTA = WIDTH_POINTS - VIEW_WIDTH_POINTS
 HEIGHT_POINTS_DELTA = HEIGHT_POINTS - VIEW_HEIGHT_POINTS
+MAX_NORMAL_MAP = 30
+MAX_EGG_MAP = 20
 
 # --- utility ---
 
 def asset_path(sub: str) -> Path:
     root = Path(__file__).parent.parent
     return root / "assets" / sub
+
+
+def _is_valid_map_number(kind: str, number: int) -> bool:
+    if number < 1:
+        return False
+    if kind == "normal":
+        return number <= MAX_NORMAL_MAP
+    if kind == "egg":
+        return number <= MAX_EGG_MAP
+    return False
 
 
 def load_image(sub: str) -> Surface:
@@ -461,7 +473,11 @@ class Assets:
         self.help = load_image("image/help.png")
 
         # sounds
-        pygame.mixer.init()
+        self.audio_enabled = True
+        try:
+            pygame.mixer.init()
+        except Exception:
+            self.audio_enabled = False
         base = lambda fname: asset_path(f"audio/{fname}")
         # helper for fallback beep
         def _beep():
@@ -470,17 +486,28 @@ class Assets:
                 winsound.Beep(1000, 100)
             except Exception:
                 print("\a", end="", flush=True)
-        try:
-            self.snd_carrot = pygame.mixer.Sound(str(base("carrot.mid")))
-        except Exception:
-            self.snd_carrot = None
+        def _load_sound(candidates: List[str]):
+            if not self.audio_enabled:
+                return None
+            for candidate in candidates:
+                p = base(candidate)
+                if not p.exists():
+                    continue
+                try:
+                    return pygame.mixer.Sound(str(p))
+                except Exception:
+                    continue
+            return None
+
+        self.snd_carrot = _load_sound(["carrot.mid", "carrot.mmf", "carrot.mfm"])
         # background music (looping)
-        try:
-            pygame.mixer.music.load(str(base("title.mid")))
-            pygame.mixer.music.play(-1)
-        except Exception:
-            # if loading fails, play a beep once
-            _beep()
+        if self.audio_enabled:
+            try:
+                pygame.mixer.music.load(str(base("title.mid")))
+                pygame.mixer.music.play(-1)
+            except Exception:
+                # if loading fails, play a beep once
+                _beep()
         # store beep helper for use elsewhere
         self._beep = _beep
 
@@ -489,22 +516,37 @@ class Assets:
 def parse_map_arg(arg: str) -> Map:
     try:
         num = int(arg)
-        return Map("normal", num)
     except ValueError:
-        pass
+        num = None
+    if num is not None:
+        if not _is_valid_map_number("normal", num):
+            raise ValueError(f"Normal map out of range: {num} (expected 1-{MAX_NORMAL_MAP})")
+        return Map("normal", num)
     if "-" in arg:
         type_str, num_str = arg.split("-", 1)
-        num = int(num_str)
+        try:
+            num = int(num_str)
+        except ValueError as exc:
+            raise ValueError(f"Invalid map: {arg}") from exc
         if type_str.lower() == "normal":
+            if not _is_valid_map_number("normal", num):
+                raise ValueError(f"Normal map out of range: {num} (expected 1-{MAX_NORMAL_MAP})")
             return Map("normal", num)
         elif type_str.lower() == "egg":
+            if not _is_valid_map_number("egg", num):
+                raise ValueError(f"Egg map out of range: {num} (expected 1-{MAX_EGG_MAP})")
             return Map("egg", num)
     raise ValueError(f"Invalid map: {arg}")
 
 
 def choose_map_interactive() -> Map:
     print("Select a level to play (examples: 5, normal-3, egg-10).\nPress Enter for normal level 1:")
-    choice = input("> ").strip()
+    if not sys.stdin.isatty():
+        return Map("normal", 1)
+    try:
+        choice = input("> ").strip()
+    except EOFError:
+        return Map("normal", 1)
     if choice == "":
         return Map("normal", 1)
     return parse_map_arg(choice)
@@ -519,11 +561,15 @@ def main():
 
     pygame.init()
     # determine starting map
-    if len(sys.argv) > 1:
-        map_obj = parse_map_arg(sys.argv[1])
-    else:
-        map_obj = choose_map_interactive()
-    map_info_fresh = map_obj.load_map_info()
+    try:
+        if len(sys.argv) > 1:
+            map_obj = parse_map_arg(sys.argv[1])
+        else:
+            map_obj = choose_map_interactive()
+        map_info_fresh = map_obj.load_map_info()
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"Failed to load map: {exc}")
+        sys.exit(2)
     map_info = MapInfo(map_info_fresh.data.copy(), map_info_fresh.coord_start,
                        map_info_fresh.carrot_total, map_info_fresh.egg_total)
 

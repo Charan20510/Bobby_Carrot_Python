@@ -1,22 +1,21 @@
-# Bobby Carrot – Python Folder
+# Bobby Carrot - Python Port
 
-The `python/` directory provides two ways to run the classic Bobby Carrot game
-from a Python environment:
+This repository provides a Python implementation of the classic Bobby Carrot game.
+It supports two ways to run:
 
 1. **Rust launcher** (`run.py`) – builds and executes the existing Rust
 game.  This variant requires a Rust toolchain but does not depend on `pygame`.
-2. **Pure‑Python port** (`bobby_carrot` package) – a faithful re‑implementation
+2. **Pure-Python port** (`bobby_carrot` package) - a faithful re-implementation
 of the game in Python using `pygame`.  All assets (tiles, audio, level files)
-are bundled under `python/assets` so the port can run standalone.
+are bundled under `assets` so the port can run standalone.
 
-The remainder of the repository is the original Rust source; the Python port
-shares its assets and level data but lives completely in `python/`.
+The Python source code lives in `bobby_carrot/`.
 
 ---
 
 ## Prerequisites
 
-* **Python 3.7+** (3.13 recommended – `pygame` wheels currently available for
+* **Python 3.7+** (3.13 recommended - `pygame` wheels currently available for
   up through 3.13).  If you are using a newer interpreter, install `pygame`
   manually or use a different version.
 * **pygame** (only required for the Python implementation).
@@ -30,9 +29,11 @@ shares its assets and level data but lives completely in `python/`.
 Create a virtual environment and install the package:
 
 ```powershell
-cd python
-python -m venv ../.venv313   # or use your preferred interpreter
-& ..\.venv313\Scripts\Activate.ps1
+python -m venv .venv
+# Linux/macOS
+source .venv/bin/activate
+# Windows PowerShell
+# .\.venv\Scripts\Activate.ps1
 pip install -e .
 ```
 
@@ -74,14 +75,13 @@ you can fall back to the Rust launcher.
 
 ## Notes for developers
 
-* Source code: `python/bobby_carrot`.
-* Assets: `python/assets` (maps, images, audio).
+* Source code: `bobby_carrot`.
+* Assets: `assets` (maps, images, audio).
 * The Python package is intentionally simple and is installed in editable mode
   by default.
-* The Rust code remains untouched in `rust/src/main.rs`; the Python port is a
-  line‑by‑line translation with identical gameplay.
+* The Rust launcher option remains available if your checkout includes `run.py`.
 
 ---
 
-This README now serves as the primary documentation for the Python portion of
-the project and is ready for display on GitHub.  Adjust or extend as needed.
+This README is the primary documentation for this Python port. Adjust or extend
+as needed.
