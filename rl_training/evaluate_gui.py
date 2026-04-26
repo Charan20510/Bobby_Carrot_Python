@@ -44,17 +44,64 @@ except ImportError:
     _HAS_RECURRENT = False
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
 # ── Model loading ────────────────────────────────────────────────────────────
+
+def _resolve_model_path(path: str) -> Path:
+    """Resolve a requested model path to an existing checkpoint file.
+
+    The GUI accepts a best_model.zip-style path, but training in this repo may
+    only leave behind checkpoints or final stage exports. When the exact file
+    is missing, fall back to the newest model artifact in the same directory.
+    """
+    requested = Path(path).expanduser()
+    repo_root = Path(__file__).resolve().parents[1]
+
+    candidates = [requested]
+    if requested.suffix != ".zip":
+        candidates.append(requested.with_suffix(".zip"))
+
+    if not requested.is_absolute():
+        candidates.extend([repo_root / candidate for candidate in list(candidates)])
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    search_dir = requested if requested.is_dir() else requested.parent
+    if not search_dir.is_absolute():
+        search_dir = repo_root / search_dir
+    if search_dir.exists():
+        for pattern in ("best_model.zip", "*_final.zip", "ckpt_*_steps.zip"):
+            matches = sorted(search_dir.glob(pattern))
+            if matches:
+                return matches[-1]
+
+    raise FileNotFoundError(
+        f"Could not find model file for '{path}'. Looked for the requested file, "
+        f"a .zip variant, and stage artifacts in '{search_dir}'."
+    )
 
 def load_model(path: str) -> Tuple[object, bool]:
     """Load a trained model, trying RecurrentPPO first then PPO."""
+    resolved_path = _resolve_model_path(path)
+    if resolved_path != Path(path):
+        print(f"Resolved model path: {resolved_path}")
+    custom_objects = {
+        "learning_rate": 3e-4,
+        "clip_range": 0.2,
+    }
     if _HAS_RECURRENT:
         try:
-            model = RecurrentPPO.load(path)
+            model = RecurrentPPO.load(resolved_path, custom_objects=custom_objects)
             return model, True
         except Exception:
             pass
-    model = PPO.load(path)
+    model = PPO.load(resolved_path, custom_objects=custom_objects)
     return model, False
 
 
@@ -131,6 +178,8 @@ def play_level_gui(
 
     lstm_states = None
     episode_start = np.array([True])
+    _hl_renderer = None
+    _hl_assets = None
 
     for step_i in range(max_steps):
         # Handle Pygame events (quit, etc)
@@ -197,13 +246,29 @@ def play_level_gui(
             pygame.display.flip()
             clock.tick(fps)
 
-        # Save frame
-        if save_frames_dir and not headless:
-            frame_path = os.path.join(
-                save_frames_dir, f"frame_{frames_saved:05d}.png"
-            )
-            pygame.image.save(pygame.display.get_surface(), frame_path)
-            frames_saved += 1
+        # Save frame (works in both headed and headless modes)
+        if save_frames_dir:
+            if not headless:
+                frame_path = os.path.join(
+                    save_frames_dir, f"frame_{frames_saved:05d}.png"
+                )
+                pygame.image.save(pygame.display.get_surface(), frame_path)
+                frames_saved += 1
+            else:
+                # Headless frame capture: render to an off-screen surface
+                gs = env._env.gs
+                if _hl_renderer is None:
+                    from bobby_carrot.renderer import Renderer, Assets
+                    _hl_renderer = Renderer()
+                    _hl_assets = Assets()
+                _hl_renderer.draw(gs, _hl_assets)
+                _hl_surface = pygame.display.get_surface()
+                if _hl_surface is not None:
+                    frame_path = os.path.join(
+                        save_frames_dir, f"frame_{frames_saved:05d}.png"
+                    )
+                    pygame.image.save(_hl_surface, frame_path)
+                    frames_saved += 1
 
         if terminated or truncated:
             won = total_reward > 5.0
@@ -255,6 +320,7 @@ def batch_evaluate(
     n_episodes: int = 10,
     max_steps: int = 500,
     headless: bool = True,
+    save_frames_dir: Optional[str] = None,
 ) -> dict:
     """Run batch evaluation on multiple levels, return per-level results."""
     all_results = {}
@@ -284,9 +350,19 @@ def batch_evaluate(
             file=sys.__stdout__,
         )
         for ep in ep_pbar:
+            # Per-level frame directory: e.g. frames/L01/
+            ep_frame_dir = None
+            if save_frames_dir:
+                ep_frame_dir = os.path.join(
+                    save_frames_dir, f"L{level:02d}"
+                )
+                if n_episodes > 1:
+                    ep_frame_dir = os.path.join(ep_frame_dir, f"ep_{ep:03d}")
+
             result = play_level_gui(
                 model, is_recurrent, level,
                 fps=60, max_steps=max_steps,
+                save_frames_dir=ep_frame_dir,
                 headless=headless,
             )
             if result["won"]:
@@ -421,12 +497,20 @@ def main():
     else:
         # Batch evaluation with report
         levels = parse_levels(args.levels) if args.levels else [args.level]
-        n_eps = args.episodes if args.episodes > 1 else 10
+        # When saving frames, default to 1 episode per level;
+        # otherwise default to 10 for statistical reports.
+        if args.episodes > 1:
+            n_eps = args.episodes
+        elif args.save_frames:
+            n_eps = 1
+        else:
+            n_eps = 10
         batch_evaluate(
             model, is_recurrent, levels,
             n_episodes=n_eps,
             max_steps=args.max_steps,
             headless=args.headless or args.report,
+            save_frames_dir=args.save_frames,
         )
 
 

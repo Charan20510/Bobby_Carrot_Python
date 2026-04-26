@@ -20,6 +20,7 @@ from .config import (
     EXIT_APPROACH_BONUS,
     EXIT_RETREAT_PENALTY,
     POST_COLLECT_STEP_PENALTY,
+    ALL_COLLECTED_BONUS,
 )
 
 
@@ -106,9 +107,11 @@ class RewardShapingWrapper(gym.Wrapper):
                 )
                 if all_collected:
                     if not self._all_collected:
-                        # First step after collecting all: initialise
+                        # First step after collecting all: initialise and
+                        # give a one-time bonus to mark the phase transition
                         self._all_collected = True
                         self._prev_exit_dist = bfs_to_exit(gs)
+                        reward += ALL_COLLECTED_BONUS
 
                     curr_exit_dist = bfs_to_exit(gs)
                     if (self._prev_exit_dist is not None

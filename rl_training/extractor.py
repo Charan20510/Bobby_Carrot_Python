@@ -57,7 +57,7 @@ class BobbyExtractor(BaseFeaturesExtractor):
         self.attn = _TileAttention(embed_dim=128, num_heads=4)
         self.pool = nn.Sequential(nn.AdaptiveAvgPool2d(2), nn.Flatten())
         self.scalar_net = nn.Sequential(
-            nn.Linear(9, 64), nn.ReLU(),
+            nn.Linear(11, 64), nn.ReLU(),
             nn.Linear(64, 64), nn.ReLU(),
         )
         self.fuse = nn.Sequential(nn.Linear(512 + 64, features_dim), nn.ReLU())
@@ -88,6 +88,16 @@ class BobbyExtractor(BaseFeaturesExtractor):
         et = _proc_scalar("egg_total", 64)
         keys = obs["keys"].view(B, 3).float()
 
-        scalars = torch.cat([px, py, cc, ct, ec, et, keys], dim=1)
+        # Completion signals: explicit ratio + binary flag so the network
+        # can clearly distinguish "collecting" from "seek exit" phase.
+        total = ct + et + 1e-8          # avoid div-by-zero
+        collected = cc + ec
+        completion_ratio = collected / total          # 0→1 as items collected
+        all_collected = (completion_ratio >= 1.0 - 1e-6).float()  # binary flag
+
+        scalars = torch.cat(
+            [px, py, cc, ct, ec, et, keys, completion_ratio, all_collected],
+            dim=1,
+        )
         sc_out = self.scalar_net(scalars)
         return self.fuse(torch.cat([cnn_out, sc_out], dim=1))

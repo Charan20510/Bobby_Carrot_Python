@@ -132,7 +132,7 @@ class WinRateCallback(BaseCallback):
         eval_levels: List[int],
         n_eval_episodes: int = 10,
         check_freq: int = 100_000,
-        max_eval_steps: int = 250,
+        max_eval_steps: int = 500,
         verbose: int = 1,
     ):
         super().__init__(verbose=verbose)

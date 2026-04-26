@@ -111,7 +111,7 @@ def run_training(drive_dir, device, n_envs):
         tab_cb = TabularLogCallback()
         win_cb = WinRateCallback(stage=stage, eval_levels=STAGE_ALL_LEVELS[stage],
                                  n_eval_episodes=STAGE_EVAL_EPS[stage], check_freq=STAGE_CHECK_FREQ[stage],
-                                 max_eval_steps=250, verbose=1)
+                                 max_eval_steps=500, verbose=1)
         win_cb._steps_at_last_check = resume_steps
         ckpt_cb = CheckpointCallback(save_freq=max(500_000 // n_env, 1), save_path=model_dir, name_prefix="ckpt")
         heartbeat = _Heartbeat(model, interval=30.0, stall_warn=120.0); heartbeat.start()
