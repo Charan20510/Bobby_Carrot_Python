@@ -11,7 +11,7 @@ from .config import (
     RECURRENT_FROM_STAGE, PPO_BASE_KWARGS, RECURRENT_KWARGS, get_policy_kwargs,
 )
 from .wrappers import CurriculumEnv
-from .callbacks import TabularLogCallback, WinRateCallback
+from .callbacks import TabularLogCallback, WinRateCallback, StageProgressCallback
 
 try:
     from sb3_contrib import RecurrentPPO
@@ -122,8 +122,9 @@ def run_training(drive_dir, device, n_envs):
                 from sb3_contrib import RecurrentPPO as _RPPO; win_cb._is_recurrent = isinstance(model, _RPPO)
             except ImportError: win_cb._is_recurrent = False
             win_cb._run_eval()
+        progress_cb = StageProgressCallback(stage=stage, resume_steps=resume_steps)
         try:
-            model.learn(total_timesteps=STAGE_MAX_STEPS[stage], callback=[tab_cb, win_cb, ckpt_cb],
+            model.learn(total_timesteps=STAGE_MAX_STEPS[stage], callback=[tab_cb, win_cb, ckpt_cb, progress_cb],
                         reset_num_timesteps=reset_ts, tb_log_name=f"{algo_name}_stage{stage}", progress_bar=False)
             model.save(f"{drive_dir}/models/stage_{stage}_final")
         except KeyboardInterrupt:

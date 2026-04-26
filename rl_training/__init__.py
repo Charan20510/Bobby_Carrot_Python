@@ -20,6 +20,9 @@ from .config import (
     STAGE_CHECK_FREQ,
     STAGE_EVAL_EPS,
     RECURRENT_FROM_STAGE,
+    EXIT_APPROACH_BONUS,
+    EXIT_RETREAT_PENALTY,
+    POST_COLLECT_STEP_PENALTY,
     N_STEPS,
     BATCH_SIZE,
     PPO_BASE_KWARGS,
@@ -27,7 +30,7 @@ from .config import (
     get_n_envs,
     get_policy_kwargs,
 )
-from .potential import compute_potential
+from .potential import compute_potential, bfs_to_exit
 
 # Gymnasium wrappers — require gymnasium + bobby_carrot but NOT stable_baselines3
 try:

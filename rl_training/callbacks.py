@@ -22,6 +22,7 @@ from bobby_carrot.gym_env import BobbyCarrotEnv
 from .config import (
     STAGE_WIN_THRESHOLD,
     STAGE_MIN_STEPS,
+    STAGE_MAX_STEPS,
 )
 
 
@@ -333,3 +334,65 @@ class WinRateCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         return not self.promote
+
+
+# ── Stage Progress Callback ──────────────────────────────────────────────────
+class StageProgressCallback(BaseCallback):
+    """Displays a tqdm progress bar tracking timesteps within the current stage.
+
+    Updates every rollout to avoid overhead.  The bar shows
+    ``num_timesteps / max_steps`` for the stage and includes the current
+    episode reward and length in the postfix.
+    """
+
+    def __init__(self, stage: int, resume_steps: int = 0):
+        super().__init__(verbose=0)
+        self.stage = stage
+        self._resume_steps = resume_steps
+        self._pbar = None
+        self._stage_start = 0
+
+    def _on_training_start(self) -> None:
+        self._stage_start = self.num_timesteps
+        max_steps = STAGE_MAX_STEPS[self.stage]
+        initial = self._resume_steps
+        self._pbar = tqdm(
+            total=max_steps,
+            initial=initial,
+            desc=f"  Stage {self.stage}",
+            unit="step",
+            unit_scale=True,
+            dynamic_ncols=True,
+            file=sys.__stdout__,
+            miniters=1,
+        )
+
+    def _on_rollout_end(self) -> None:
+        if self._pbar is None:
+            return
+        stage_steps = self.num_timesteps - self._stage_start + self._resume_steps
+        self._pbar.n = min(stage_steps, self._pbar.total)
+        self._pbar.refresh()
+
+        # Show latest episode stats in the postfix
+        try:
+            info = self.model.logger.name_to_value
+            ep_rew = info.get("rollout/ep_rew_mean", None)
+            ep_len = info.get("rollout/ep_len_mean", None)
+            postfix = {}
+            if ep_rew is not None:
+                postfix["rew"] = f"{ep_rew:.1f}"
+            if ep_len is not None:
+                postfix["len"] = f"{ep_len:.0f}"
+            if postfix:
+                self._pbar.set_postfix(postfix)
+        except Exception:
+            pass
+
+    def _on_training_end(self) -> None:
+        if self._pbar:
+            self._pbar.close()
+            self._pbar = None
+
+    def _on_step(self) -> bool:
+        return True

@@ -13,15 +13,18 @@ import gymnasium as gym
 
 from bobby_carrot.gym_env import BobbyCarrotEnv
 
-from .potential import compute_potential
+from .potential import compute_potential, bfs_to_exit
 from .config import (
     STAGE_ALL_LEVELS,
     STAGE_NEW_START,
+    EXIT_APPROACH_BONUS,
+    EXIT_RETREAT_PENALTY,
+    POST_COLLECT_STEP_PENALTY,
 )
 
 
 class RewardShapingWrapper(gym.Wrapper):
-    """Potential-based reward shaping + key-pickup bonus + win efficiency bonus.
+    """Potential-based reward shaping + exit-seeking bonus + key-pickup bonus.
 
     Shaped reward on each step:
         r'(s,a,s') = r(s,a,s') + γ·Φ(s') - Φ(s)   (Ng et al. 1999)
@@ -31,22 +34,16 @@ class RewardShapingWrapper(gym.Wrapper):
     For deaths Φ(s') = Φ(s) so shaping ≈ (γ-1)·Φ ≈ 0, keeping the
     -1.0 death penalty as the sole death signal.
 
+    Exit-seeking (the critical fix for 0% win rate):
+        After all collectibles are gathered, gives +0.3 per step that
+        moves closer to the exit, -0.1 per step that moves away.  This
+        is 50× stronger than the bare potential shaping gradient (~0.006).
+        Also increases the step penalty from -0.01 to -0.05 to create
+        urgency in reaching the exit.
+
     Bonuses:
         +key_pickup:   +0.3   (matters from stage 5 onward; harmless earlier)
         +efficiency:   +5.0 × (1 - steps/max_steps)  on win
-
-    Removed (as of stage-1 reward redesign — they caused reward farming):
-        +0.1 × (collected/total)  per carrot_collected
-        +0.2  per crumble_survived
-    These dense non-potential bonuses created a local optimum where the agent
-    farmed partial-progress reward without ever reaching the exit. Empirically
-    that produced ep_rew_mean ≈ 6 with 0% L01–L03 win rate at 500K steps.
-    Removing them restores the property that the only large reward path is
-    "collect all → reach exit", which the potential function already shapes.
-
-    The efficiency bonus was also raised from +2.0 → +5.0 to widen the gap
-    between "win" (~+15 shaped return on L01) and "wander" (~0), giving the
-    value head a sharper signal to latch onto early.
     """
     GAMMA = 0.995
     EFFICIENCY_BONUS = 5.0
@@ -56,12 +53,16 @@ class RewardShapingWrapper(gym.Wrapper):
         self._max_steps = max_episode_steps
         self._prev_potential = 0.0
         self._step_count = 0
+        self._prev_exit_dist = None
+        self._all_collected = False
 
     DEBUG_RESET = False   # flip to True to log per-reset potential
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self._step_count = 0
+        self._prev_exit_dist = None
+        self._all_collected = False
         gs = self._get_gs()
         self._prev_potential = compute_potential(gs) if gs else 0.0
         if self.DEBUG_RESET:
@@ -91,6 +92,39 @@ class RewardShapingWrapper(gym.Wrapper):
         if not terminated:
             gs = self._get_gs()
             curr_potential = compute_potential(gs) if gs else 0.0
+
+            # ── Exit-seeking reward (the critical fix) ──────────────────
+            # After all collectibles are gathered, give explicit per-step
+            # reward for approaching the exit.  The bare potential shaping
+            # gradient (~0.006/step) is 150× weaker than carrot pickup
+            # (+1.0) and gets lost in noise.  This 0.3/step bonus makes
+            # exit-seeking a clear, learnable signal.
+            if gs:
+                all_collected = (
+                    gs.carrot_count >= gs.carrot_total
+                    and gs.egg_count >= gs.egg_total
+                )
+                if all_collected:
+                    if not self._all_collected:
+                        # First step after collecting all: initialise
+                        self._all_collected = True
+                        self._prev_exit_dist = bfs_to_exit(gs)
+
+                    curr_exit_dist = bfs_to_exit(gs)
+                    if (self._prev_exit_dist is not None
+                            and self._prev_exit_dist >= 0
+                            and curr_exit_dist >= 0):
+                        delta = self._prev_exit_dist - curr_exit_dist
+                        if delta > 0:
+                            reward += EXIT_APPROACH_BONUS
+                        elif delta < 0:
+                            reward -= EXIT_RETREAT_PENALTY
+                    self._prev_exit_dist = curr_exit_dist
+
+                    # Increased step penalty after collection to create
+                    # urgency: -0.05 instead of the base -0.01
+                    reward -= POST_COLLECT_STEP_PENALTY
+
         elif reward > 5.0:
             # Win: all goals reached; Φ(terminal) = 0 by definition.
             curr_potential = 0.0

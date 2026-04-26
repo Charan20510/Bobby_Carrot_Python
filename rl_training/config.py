@@ -27,12 +27,12 @@ STAGE_MAX_STEPS = {
 }
 
 # Per-stage episode horizons.
-STAGE_MAX_EPISODE_STEPS = {1: 250, 2: 300, 3: 400, 4: 500, 5: 500}
+STAGE_MAX_EPISODE_STEPS = {1: 350, 2: 400, 3: 500, 4: 600, 5: 600}
 
 # Per-stage entropy coefficient.
 # Stage 1 was originally 0.02 — far too high; 0.005 is the SB3 default and
 # lets the policy commit without premature convergence.
-STAGE_ENT_COEF = {1: 0.005, 2: 0.01, 3: 0.01, 4: 0.005, 5: 0.005}
+STAGE_ENT_COEF = {1: 0.02, 2: 0.01, 3: 0.01, 4: 0.005, 5: 0.005}
 
 # Per-stage eval cadence and episodes.
 STAGE_CHECK_FREQ = {
@@ -44,6 +44,15 @@ STAGE_EVAL_EPS = {1: 20, 2: 15, 3: 10, 4: 10, 5: 10}
 # Stages 1-2: standard PPO (fast, no LSTM overhead)
 # Stages 3-5: RecurrentPPO with LSTM (better multi-step planning)
 RECURRENT_FROM_STAGE = 3   # set to 6 to disable RecurrentPPO entirely
+
+# ── Exit-seeking reward constants ────────────────────────────────────────────
+# After all collectibles are gathered, reward/penalise movement toward/away
+# from the exit tile.  Without this, the BFS potential shaping alone gives
+# only ~0.006 per step — 150× weaker than a carrot (+1.0) — so the agent
+# collects all carrots and then wanders.
+EXIT_APPROACH_BONUS  = 0.3    # per-step bonus for moving closer to exit
+EXIT_RETREAT_PENALTY = 0.1    # per-step penalty for moving away from exit
+POST_COLLECT_STEP_PENALTY = 0.05  # increased step penalty after all collected
 
 N_STEPS    = 256   # shorter rollouts → more frequent updates
 
