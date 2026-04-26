@@ -1,0 +1,121 @@
+Bobby Carrot RL — Project Report
+Generated: 2026-04-26 17:02:06 IST
+
+================================================================================
+GOAL
+================================================================================
+Train an RL agent on Bobby Carrot normal levels 1–25 via a 5-stage curriculum
+and evaluate zero-shot on held-out normal levels 26–30. Levels 26–30 are never
+seen during training; they are the sole test set.
+
+Per-level success metrics:
+  - Win rate over 50 deterministic episodes (model.predict(deterministic=True))
+  - Mean episode reward (shaped)
+  - Mean steps to win
+  - Failure-mode breakdown: death / timeout / stuck-near-exit / unknown
+  - Mean carrot completion %
+
+================================================================================
+KEY ACHIEVEMENTS
+================================================================================
+
+1. Logic / Renderer Separation (foundational refactor)
+   - core/ + env.py: pure logic, pygame-free
+   - renderer.py: sole pygame entry point, lazily imported
+   - gym_env.py: Gymnasium wrapper around GameEnv
+   - Result: ~175k logical steps/sec headless vs. original 60 FPS
+            (~2,900x speedup — prerequisite for any RL work)
+
+2. RL Training Infrastructure
+   - Headless GameEnv with reward shaping
+       (-0.01/step, +1 carrot/egg, +10 win, -1 death)
+   - BobbyCarrotEnv Gymnasium wrapper with Dict observation space
+   - BobbyExtractor: tile embeddings -> CNN+ResBlock -> 4-head self-attention
+                     -> 256-dim features
+   - DummyVecEnv with auto-sized N_ENVS based on CPU RAM (8 / 16 / 32)
+   - Cosine LR schedule (3e-4 -> 1e-5), per-stage ent_coef
+   - gamma=0.995, gae_lambda=0.97, n_steps=256, batch_size=512
+
+3. Curriculum (5 stages, mechanic-keyed)
+   Stage 1: L01–L03  Walls, floor, carrots         PPO
+   Stage 2: L01–L07  + Crumble tiles               PPO
+   Stage 3: L01–L12  + Directional conveyors       RecurrentPPO
+   Stage 4: L01–L17  + Red/Yellow switches         RecurrentPPO
+   Stage 5: L01–L25  + Keys/Locks, full mix        RecurrentPPO
+
+   - Adaptive promotion: hardest level hits STAGE_WIN_THRESHOLD AND
+     total steps >= STAGE_MIN_STEPS
+   - 70/30 new-vs-prior level sampling for stages > 1
+   - Inverse-win-rate level sampling within a stage
+     (weight = 1 - rolling_win_rate, clamped >= 0.05)
+
+4. Per-Level Evaluation Pipeline (cells 15–16)
+   Produces 6-panel chart for L26–L30:
+     win rate, mean reward, failure-mode stack, carrot %,
+     plus visitation heatmaps for L26 and L27.
+   Saved to ${DRIVE_DIR}/eval_results_v2.png.
+
+5. Resilient Long-Run Training
+   - Checkpoint resume via _find_latest_ckpt
+     (handles both ckpt_*_steps.zip and ckpt_interrupt_*_steps.zip)
+   - stage_{N}_final.zip sentinel skips completed stages on reconnect
+   - KeyboardInterrupt saves a rescue checkpoint before re-raising
+   - Daemon heartbeat thread: [heartbeat] every 30 s,
+     [FREEZE WARNING] after 120 s of no progress
+   - Defensive try/except around eval so flaky evals can't kill
+     multi-hour runs
+
+================================================================================
+CHALLENGES ENCOUNTERED & RESOLUTIONS
+================================================================================
+
+Challenge: Reward farming — ep_rew_mean ~= 6 but 0% L01–L03 wins at 500K steps
+Resolution: Removed dense per-carrot / per-crumble bonuses; kept only
+            potential-based shaping (Ng et al. 1999) + key bonus
+            + +5 efficiency-on-win.
+
+Challenge: Stage 1 entropy too high (ent_coef=0.02 -> near-uniform policy,
+           0% wins).
+Resolution: Lowered to 0.005; per-stage ent_coef dict tuned per mechanic.
+
+Challenge: Stage 1 promotion threshold statistically unresolvable.
+Resolution: Retuned — min steps 500K -> 100K, eval episodes 3 -> 20.
+
+Challenge: tqdm.rich + IPython stdout hijack caused RecursionError that killed
+           Colab runs after hours.
+Resolution: _safe_print routes through tqdm.write(file=sys.__stdout__);
+            progress_bar=False on model.learn.
+
+Challenge: Conveyors / switches / keys require multi-step memory.
+Resolution: RecurrentPPO (LSTM) from stage 3 onward; PPO for stages 1–2
+            where the LSTM is pure overhead.
+
+Challenge: Death potential read crashed because env reloads before next obs.
+Resolution: Φ(s') = Φ(s) on death; Φ(terminal) = 0 on win.
+
+Challenge: Frequent Colab disconnects / reconnects.
+Resolution: Drive-mounted checkpoints + sentinel files; warm-start across
+            stages only when algorithm class matches.
+
+================================================================================
+STAGE STEP BUDGETS & EVAL CADENCE
+================================================================================
+Stage 1: min 100K  / max  5M    eval every 100K   20 eps/level
+Stage 2: min 750K  / max  8M    eval every 250K   15 eps/level
+Stage 3: min 2M    / max 12M    eval every 500K   10 eps/level
+Stage 4: min 3M    / max 15M    eval every 1M     10 eps/level
+Stage 5: min 4M    / max 20M    eval every 1M     10 eps/level
+
+Episode horizons:
+  - Curriculum wrapper max_episode_steps = 500
+  - Per-level eval cap                  = 250
+  - Replay cell MAX_STEPS               = 400
+  - Held-out eval hard stop             = 500
+
+================================================================================
+STATUS
+================================================================================
+Codebase architecture is stable. Training and eval pipelines are end-to-end.
+Recent commits indicate per-level eval and frozen-training / cross-account-
+training iterations are landing. Held-out L26–L30 evaluation is the live
+success metric.
