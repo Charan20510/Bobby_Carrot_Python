@@ -30,9 +30,12 @@ STAGE_MAX_STEPS = {
 STAGE_MAX_EPISODE_STEPS = {1: 500, 2: 500, 3: 500, 4: 600, 5: 600}
 
 # Per-stage entropy coefficient.
-# Stage 1 was originally 0.02 — far too high; 0.005 is the SB3 default and
-# lets the policy commit without premature convergence.
-STAGE_ENT_COEF = {1: 0.01, 2: 0.01, 3: 0.01, 4: 0.005, 5: 0.005}
+# Stage 1 history: 0.02 drowned the policy gradient (entropy ≈ -1.5, near
+# uniform). Bumped to 0.01 — still too flat: 1.5M steps with entropy stuck
+# at -1.09 and 0/60 deterministic wins on L01–L03 despite ep_rew_mean ≈ +10
+# (stochastic rollouts win, deterministic argmax doesn't commit).
+# Dropping to 0.005 (SB3 default) so the policy can sharpen.
+STAGE_ENT_COEF = {1: 0.005, 2: 0.01, 3: 0.01, 4: 0.005, 5: 0.005}
 
 # Per-stage eval cadence and episodes.
 STAGE_CHECK_FREQ = {
@@ -71,9 +74,14 @@ PPO_BASE_KWARGS = dict(
     max_grad_norm = 0.5,
 )
 
-# RecurrentPPO-specific: LSTM hidden size
-RECURRENT_KWARGS = dict(
-    **PPO_BASE_KWARGS,
+# RecurrentPPO algo kwargs are identical to PPO's; the LSTM-specific
+# arguments (lstm_hidden_size, n_lstm_layers) belong in policy_kwargs, not
+# in __init__.  Mixing them in caused a TypeError at Stage 3 startup —
+# kept separate here so the wiring in train.py is unambiguous.
+RECURRENT_KWARGS = dict(**PPO_BASE_KWARGS)
+
+# RecurrentPPO-specific policy kwargs (merged into policy_kwargs for stages 3+).
+RECURRENT_POLICY_KWARGS = dict(
     lstm_hidden_size = 256,
     n_lstm_layers    = 1,
 )

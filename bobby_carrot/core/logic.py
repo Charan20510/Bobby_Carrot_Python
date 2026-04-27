@@ -270,6 +270,15 @@ def apply_landing(gs: GameState) -> Tuple[GameState, List[str]]:
         if queued == State.Death:
             gs.dead = True
             gs.player_state = State.Death
+            # Emit a typed death cause so RL eval / failure-mode breakdown
+            # can distinguish crumble deaths from other deaths.  Tile 31 is
+            # the only deadly tile in the game; this branch fires whenever
+            # the agent stepped onto a collapsed crumble.
+            death_pos = gs.coord_src[0] + gs.coord_src[1] * 16
+            if gs.tiles[death_pos] == 31:
+                events.append("died_on_crumble")
+            else:
+                events.append("died_other")
         else:
             gs = start_move(gs, queued)
 

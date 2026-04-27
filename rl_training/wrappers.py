@@ -49,6 +49,24 @@ class RewardShapingWrapper(gym.Wrapper):
     GAMMA = 0.995
     EFFICIENCY_BONUS = 5.0
 
+    # ── Edge-case termination tunables (Phase 2) ───────────────────────────
+    # Conveyor-trap: 3 consecutive same-position steps ON a conveyor tile.
+    # Two conveyors pointing at each other trap the agent forever; without
+    # this, episodes burn the full 500-step horizon in a stuck state.
+    CONVEYOR_TILE_IDS = frozenset({24, 25, 26, 27, 28, 29, 40, 41, 42, 43})
+    CONVEYOR_TRAP_THRESHOLD = 3      # steps stuck before forced termination
+    CONVEYOR_TRAP_PENALTY   = 0.5
+
+    # Loop-detection: penalise revisiting (x,y) > LOOP_VISIT_LIMIT times since
+    # the last collection event.  Counter resets on carrot/egg/key pickup.
+    LOOP_VISIT_LIMIT = 3
+    LOOP_PENALTY     = 0.1
+
+    # Unwinnable: BFS potential collapses to -1.0 when no target is reachable
+    # (typically because crumble-critical tiles all collapsed).  Terminate
+    # immediately rather than wandering 500 steps in a lost state.
+    UNWINNABLE_PENALTY = 1.0
+
     def __init__(self, env, max_episode_steps: int = 500):
         super().__init__(env)
         self._max_steps = max_episode_steps
@@ -57,6 +75,10 @@ class RewardShapingWrapper(gym.Wrapper):
         self._prev_exit_dist = None
         self._all_collected = False
 
+        # Phase 2 state
+        self._visit_count: dict = {}        # (x,y) → visit count since last event
+        self._stuck_steps = 0                # consecutive same-position steps
+
     DEBUG_RESET = False   # flip to True to log per-reset potential
 
     def reset(self, **kwargs):
@@ -64,13 +86,22 @@ class RewardShapingWrapper(gym.Wrapper):
         self._step_count = 0
         self._prev_exit_dist = None
         self._all_collected = False
+        self._visit_count = {}
+        self._stuck_steps = 0
         gs = self._get_gs()
         self._prev_potential = compute_potential(gs) if gs else 0.0
+        # Zero-collectibles edge case: if a map starts already collected,
+        # initialise exit-seeking state immediately so the +0.5/-0.3 signal
+        # is active from step 1 instead of waiting for a phase transition
+        # that has already happened.
+        if gs and gs.carrot_count >= gs.carrot_total and gs.egg_count >= gs.egg_total:
+            self._all_collected = True
+            self._prev_exit_dist = bfs_to_exit(gs)
         if self.DEBUG_RESET:
             import sys
             sys.__stdout__.write(
                 f"[RewardShapingWrapper.reset] prev_potential="
-                f"{self._prev_potential:.4f}\n"
+                f"{self._prev_potential:.4f}  all_collected={self._all_collected}\n"
             )
         return obs, info
 
@@ -89,6 +120,51 @@ class RewardShapingWrapper(gym.Wrapper):
             gs_after = self._get_gs()
             if gs_after and gs_after.coord_src == prev_pos:
                 reward -= 0.05
+
+        # ── Phase 2 edge cases (loop / conveyor-trap / unwinnable) ──────
+        # Run BEFORE the exit-seeking block so an unwinnable termination
+        # cancels potential shaping cleanly.
+        if not terminated:
+            gs = self._get_gs()
+            if gs is not None:
+                pos = gs.coord_src
+
+                # Loop detection: visit-count, reset on collection events.
+                # Frees the agent from grinding over a single cell when the
+                # potential gradient is flat (e.g. before any phase change).
+                evts = info.get("events", []) or []
+                if any(e in ("carrot_collected", "egg_collected", "key_picked")
+                       for e in evts):
+                    self._visit_count = {}
+                visits = self._visit_count.get(pos, 0) + 1
+                self._visit_count[pos] = visits
+                if visits > self.LOOP_VISIT_LIMIT:
+                    reward -= self.LOOP_PENALTY
+
+                # Conveyor-trap: same position 3 consecutive steps AND
+                # standing on a conveyor tile (forced movement). Two
+                # conveyors pointing at each other otherwise burn the full
+                # 500-step horizon.
+                if prev_pos is not None and pos == prev_pos:
+                    self._stuck_steps += 1
+                else:
+                    self._stuck_steps = 0
+                if self._stuck_steps >= self.CONVEYOR_TRAP_THRESHOLD:
+                    tile_id = gs.tiles[pos[0] + pos[1] * 16]
+                    if tile_id in self.CONVEYOR_TILE_IDS:
+                        reward -= self.CONVEYOR_TRAP_PENALTY
+                        terminated = True
+
+                # Unwinnable: BFS to nearest target unreachable.  Triggers
+                # for crumble-critical levels where the wrong crumble
+                # collapsed (e.g. L03 if all 3 crumbles are exhausted).
+                # compute_potential returns -1.0 when _bfs_distance returns
+                # -1; we read it directly to avoid a redundant BFS call.
+                if not terminated:
+                    pot = compute_potential(gs)
+                    if pot <= -0.999:   # _bfs_distance unreachable sentinel
+                        reward -= self.UNWINNABLE_PENALTY
+                        terminated = True
 
         if not terminated:
             gs = self._get_gs()
@@ -132,8 +208,9 @@ class RewardShapingWrapper(gym.Wrapper):
             # Win: all goals reached; Φ(terminal) = 0 by definition.
             curr_potential = 0.0
         else:
-            # Death: env already reloaded; cancel spurious positive shaping.
-            # The -1.0 death penalty is the sole death signal.
+            # Death OR Phase-2 forced termination (unwinnable / conveyor
+            # trap): cancel spurious potential shaping; the per-edge-case
+            # negative reward is the sole signal.
             curr_potential = self._prev_potential
 
         # Potential-based shaping (policy-invariant, Ng et al. 1999)

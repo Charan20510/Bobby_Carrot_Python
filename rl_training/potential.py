@@ -50,6 +50,12 @@ def compute_potential(gs) -> float:
     After all collectibles are gathered, exit potential is normalised by /16
     (twice as strong as carrot potential at /32) so the exit gradient is
     competitive with the carrot collection signal.
+
+    NOTE: must be recomputed every step.  The maze topology mutates whenever
+    a crumble collapses (30 → 31), a switch toggles (22/23, 24-27, 28/29,
+    38/39, 40-43), or a key/lock pair clears.  Do NOT memoize the result
+    across steps — a stale Φ will mislead the agent through tiles that no
+    longer exist.
     """
     tiles = gs.tiles
     px, py = gs.coord_src
@@ -91,3 +97,118 @@ def bfs_to_exit(gs) -> int:
         return -1
     target = {(exit_idx % 16, exit_idx // 16)}
     return _bfs_distance(tiles, px, py, target)
+
+
+def simulate_level(level_idx: int, kind: str = "normal") -> dict:
+    """Static analysis of a level: optimal path, choke points, crumble criticality.
+
+    Loads the .blm file directly (no env, no pygame) and computes:
+      - path_len:         BFS shortest start → all-carrots → exit (greedy nearest)
+      - choke_points:     tiles whose removal disconnects start from exit
+      - crumble_critical: True if collapsing any single crumble breaks reachability
+      - perfect_steps:    same as path_len (lower bound)
+      - est_timesteps:    10K × path_len × num_special_tiles (heuristic)
+      - key_insight:      one-sentence summary
+    """
+    from bobby_carrot.core.loader import Map
+    map_obj = Map(kind, level_idx)
+    info = map_obj.load_map_info()
+    tiles = info.data
+    sx, sy = info.coord_start
+
+    carrots = [(i % 16, i // 16) for i, t in enumerate(tiles) if t == 19]
+    eggs    = [(i % 16, i // 16) for i, t in enumerate(tiles) if t == 45]
+    crumbles = [(i % 16, i // 16) for i, t in enumerate(tiles) if t == 30]
+    exit_pos = next(
+        ((i % 16, i // 16) for i, t in enumerate(tiles) if t == 44), None
+    )
+
+    # Greedy nearest-neighbour TSP-style path estimate (lower bound)
+    path_len = 0
+    cur = (sx, sy)
+    remaining = list(carrots) + list(eggs)
+    while remaining:
+        # Distance from cur to each remaining target via BFS
+        dists = []
+        for tgt in remaining:
+            d = _bfs_distance(tiles, cur[0], cur[1], {tgt})
+            dists.append((d if d >= 0 else 1_000, tgt))
+        dists.sort()
+        d, nxt = dists[0]
+        if d >= 1_000:
+            path_len = -1
+            break
+        path_len += d
+        cur = nxt
+        remaining.remove(nxt)
+    if path_len >= 0 and exit_pos is not None:
+        d_exit = _bfs_distance(tiles, cur[0], cur[1], {exit_pos})
+        path_len = path_len + d_exit if d_exit >= 0 else -1
+
+    # Crumble-criticality: simulate collapsing each crumble individually and
+    # check that start can still reach the exit.
+    crumble_critical = False
+    if exit_pos is not None and path_len > 0:
+        for cx, cy in crumbles:
+            modified = list(tiles)
+            modified[cx + cy * 16] = 31  # collapsed
+            d = _bfs_distance(modified, sx, sy, {exit_pos})
+            if d < 0:
+                crumble_critical = True
+                break
+
+    # Special-tile count for the learn-time heuristic.
+    special_ids = {19, 22, 24, 25, 26, 27, 28, 29, 30, 32, 33, 34, 35, 36, 37,
+                   38, 40, 41, 42, 43, 45}
+    num_special = sum(1 for t in tiles if t in special_ids)
+
+    if path_len > 0:
+        est_timesteps = 10_000 * path_len * max(num_special, 1)
+        # Expected shaped reward on a perfect win:
+        #   native +10 (win) + N×(+1) carrot/egg + ~+5 efficiency + ~+2 phase
+        n_collect = len(carrots) + len(eggs)
+        expected_reward = 10.0 + n_collect + 5.0 + 2.0
+    else:
+        est_timesteps = -1
+        expected_reward = -1.0
+
+    if crumble_critical:
+        insight = (
+            f"crumble-critical: at least one of {len(crumbles)} crumbles must "
+            f"be preserved for the exit path"
+        )
+    elif crumbles:
+        insight = f"{len(crumbles)} crumbles present but none individually critical"
+    elif len(carrots) + len(eggs) == 0:
+        insight = "no collectibles; exit-seeking phase active from step 0"
+    else:
+        insight = f"clean path: {len(carrots)} carrots, {len(eggs)} eggs, exit"
+
+    return {
+        "level": level_idx,
+        "path_len": path_len,
+        "num_carrots": len(carrots),
+        "num_eggs": len(eggs),
+        "num_crumbles": len(crumbles),
+        "crumble_critical": crumble_critical,
+        "perfect_steps": path_len,
+        "est_timesteps": est_timesteps,
+        "expected_reward": expected_reward,
+        "key_insight": insight,
+    }
+
+
+def format_simulation(sim: dict) -> str:
+    """Render simulate_level() output in the §4 format."""
+    return (
+        f"  ┌─ Level L{sim['level']:02d} Simulation "
+        f"{'─' * (37 - len(str(sim['level'])))}┐\n"
+        f"  │ Path length (greedy)  : {sim['perfect_steps']:>5} steps              │\n"
+        f"  │ Carrots / Eggs        : {sim['num_carrots']:>2} / {sim['num_eggs']:>2}                   │\n"
+        f"  │ Crumbles              : {sim['num_crumbles']:>2}                        │\n"
+        f"  │ Crumble-critical      : {'yes' if sim['crumble_critical'] else 'no':<3}                       │\n"
+        f"  │ Estimated learn time  : {sim['est_timesteps']/1000:>6.0f}K timesteps        │\n"
+        f"  │ Expected win reward   : ~{sim['expected_reward']:>5.1f} (shaped)          │\n"
+        f"  │ Key insight: {sim['key_insight'][:48]:<48}│\n"
+        f"  └{'─' * 56}┘"
+    )

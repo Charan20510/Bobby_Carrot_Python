@@ -8,10 +8,12 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from .config import (
     STAGE_ALL_LEVELS, STAGE_MAX_STEPS, STAGE_MAX_EPISODE_STEPS,
     STAGE_ENT_COEF, STAGE_CHECK_FREQ, STAGE_EVAL_EPS,
-    RECURRENT_FROM_STAGE, PPO_BASE_KWARGS, RECURRENT_KWARGS, get_policy_kwargs,
+    RECURRENT_FROM_STAGE, PPO_BASE_KWARGS, RECURRENT_KWARGS,
+    RECURRENT_POLICY_KWARGS, get_policy_kwargs,
 )
 from .wrappers import CurriculumEnv
-from .callbacks import TabularLogCallback, WinRateCallback, StageProgressCallback
+from .callbacks import TabularLogCallback, WinRateCallback, StageProgressCallback, safe_print
+from .potential import simulate_level, format_simulation
 
 try:
     from sb3_contrib import RecurrentPPO
@@ -66,10 +68,23 @@ class _Heartbeat:
                 except: sys.__stdout__.write(msg+"\n"); sys.__stdout__.flush()
             except: pass
 
+def _policy_kwargs_for(stage: int) -> dict:
+    """policy_kwargs for the given stage.
+
+    Stages 3-5 use RecurrentPPO; lstm_hidden_size/n_lstm_layers must be
+    threaded through policy_kwargs (not algo kwargs) — wiring them as
+    algo kwargs raises TypeError at model instantiation.
+    """
+    pk = dict(get_policy_kwargs())
+    if _use_recurrent(stage):
+        pk.update(RECURRENT_POLICY_KWARGS)
+    return pk
+
+
 def run_training(drive_dir, device, n_envs):
     n_envs_recurrent = n_envs
-    policy_kwargs = get_policy_kwargs()
     for stage in range(1, 6):
+        policy_kwargs = _policy_kwargs_for(stage)
         level_range = f"L{STAGE_ALL_LEVELS[stage][0]:02d}-L{STAGE_ALL_LEVELS[stage][-1]:02d}"
         use_recurrent = _use_recurrent(stage)
         algo_name = "RecurrentPPO" if use_recurrent else "PPO"
@@ -78,6 +93,33 @@ def run_training(drive_dir, device, n_envs):
         final_path = f"{drive_dir}/models/stage_{stage}_final.zip"
         if os.path.exists(final_path):
             print(f"  Already complete ({final_path}). Skipping."); continue
+
+        # Per-level static analysis (path length, crumble criticality, etc.)
+        # Cheap (~1ms per level) and surfaces "this stage cannot be solved
+        # because L0X has no path" failure modes before training starts.
+        for lvl in STAGE_ALL_LEVELS[stage]:
+            try:
+                sim = simulate_level(lvl)
+                safe_print(format_simulation(sim))
+            except Exception as exc:
+                safe_print(f"  [simulate_level] L{lvl:02d} failed: {exc!r}")
+
+        # Config sanity asserts: catch silent drift before burning Colab hours.
+        rollout_size = PPO_BASE_KWARGS["n_steps"] * n_env
+        assert rollout_size % PPO_BASE_KWARGS["batch_size"] == 0, (
+            f"rollout buffer ({rollout_size}) not divisible by batch_size "
+            f"({PPO_BASE_KWARGS['batch_size']}); n_envs * n_steps must be a "
+            f"multiple of batch_size"
+        )
+        assert PPO_BASE_KWARGS["n_epochs"] == 10, (
+            f"n_epochs={PPO_BASE_KWARGS['n_epochs']}; PPO requires multiple "
+            f"epochs per rollout — do not reduce."
+        )
+        safe_print(
+            f"  [CONFIG] n_envs={n_env}  n_steps={PPO_BASE_KWARGS['n_steps']}  "
+            f"batch={PPO_BASE_KWARGS['batch_size']}  rollout={rollout_size}  "
+            f"ent_coef={STAGE_ENT_COEF[stage]}"
+        )
         model_dir = f"{drive_dir}/models/stage_{stage}"
         os.makedirs(model_dir, exist_ok=True)
         vec_env = VecMonitor(DummyVecEnv([make_env_fn(stage)] * n_env))

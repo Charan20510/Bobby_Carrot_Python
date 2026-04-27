@@ -6,17 +6,17 @@ for video creation, and produces per-level evaluation reports.
 
 Usage
 -----
-  # Watch a single level with live Pygame rendering:
-  python evaluate_gui.py --model models/stage_1/best_model.zip --level 1 --fps 5
+# Watch a single level with live Pygame rendering:
+python evaluate_gui.py --model models/stage_1/best_model.zip --level 1 --fps 5
 
-  # Batch evaluate levels 1-3, generate per-level report:
-  python evaluate_gui.py --model models/stage_1/best_model.zip --levels 1-3 --episodes 10 --report
+# Batch evaluate levels 1-3, generate per-level report:
+python evaluate_gui.py --model models/stage_1/best_model.zip --levels 1-3 --episodes 10 --report
 
-  # Save frames for video creation (no live display needed):
-  python evaluate_gui.py --model models/stage_1/best_model.zip --level 2 --save-frames ./frames/
+# Save frames for video creation (no live display needed):
+python evaluate_gui.py --model models/stage_1/best_model.zip --level 2 --save-frames ./frames/
 
-  # Headless batch report (no Pygame window):
-  python evaluate_gui.py --model models/stage_1/best_model.zip --levels 1-3 --episodes 20 --headless
+# Headless batch report (no Pygame window):
+python evaluate_gui.py --model models/stage_1/best_model.zip --levels 1-3 --episodes 20 --headless
 """
 from __future__ import annotations
 
@@ -180,6 +180,7 @@ def play_level_gui(
     episode_start = np.array([True])
     _hl_renderer = None
     _hl_assets = None
+    _hl_surface = None
 
     for step_i in range(max_steps):
         # Handle Pygame events (quit, etc)
@@ -255,10 +256,20 @@ def play_level_gui(
                 pygame.image.save(pygame.display.get_surface(), frame_path)
                 frames_saved += 1
             else:
-                # Headless frame capture: render to an off-screen surface
+                # Headless frame capture: write to an off-screen Surface.
+                # The previous implementation called pygame.display.get_surface()
+                # without ever calling pygame.display.set_mode(), so it returned
+                # None and frames were silently dropped.  Now we set up a dummy
+                # display surface once on first use (works under SDL_VIDEODRIVER=
+                # dummy as well) so renderer.draw has a canvas to blit to.
                 gs = env._env.gs
                 if _hl_renderer is None:
                     from bobby_carrot.renderer import Renderer, Assets
+                    if not pygame.get_init():
+                        pygame.init()
+                    if pygame.display.get_surface() is None:
+                        # SDL_VIDEODRIVER=dummy makes this a no-op visually
+                        pygame.display.set_mode((VIEW_WIDTH, VIEW_HEIGHT))
                     _hl_renderer = Renderer()
                     _hl_assets = Assets()
                 _hl_renderer.draw(gs, _hl_assets)
