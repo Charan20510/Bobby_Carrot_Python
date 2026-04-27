@@ -43,6 +43,48 @@ STAGE_CHECK_FREQ = {
 }
 STAGE_EVAL_EPS = {1: 20, 2: 15, 3: 10, 4: 10, 5: 10}
 
+# ── Per-level training config (levels 1–15) ──────────────────────────────────
+# Independent per-level training: one model per level, no curriculum pooling.
+# These dicts mirror the STAGE_* dicts but are keyed by level number.
+INDIVIDUAL_LEVELS = list(range(1, 16))
+
+LEVEL_MIN_STEPS = {
+    1: 100_000,  2: 100_000,  3: 150_000,  4: 300_000,  5: 300_000,
+    6: 300_000,  7: 400_000,  8: 500_000,  9: 500_000, 10: 500_000,
+   11: 750_000, 12: 750_000, 13: 1_000_000, 14: 1_000_000, 15: 1_000_000,
+}
+LEVEL_MAX_STEPS = {
+    1: 2_000_000,   2: 2_000_000,   3: 3_000_000,   4: 5_000_000,
+    5: 5_000_000,   6: 5_000_000,   7: 5_000_000,   8: 8_000_000,
+    9: 8_000_000,  10: 8_000_000,  11: 10_000_000,  12: 10_000_000,
+   13: 12_000_000, 14: 12_000_000, 15: 12_000_000,
+}
+
+LEVEL_MAX_EPISODE_STEPS = {
+    **{l: 500 for l in range(1, 8)},
+    **{l: 600 for l in range(8, 16)},
+}
+
+LEVEL_ENT_COEF = {
+    **{l: 0.005 for l in range(1, 4)},
+    **{l: 0.01  for l in range(4, 8)},
+    **{l: 0.01  for l in range(8, 13)},
+    **{l: 0.005 for l in range(13, 16)},
+}
+
+LEVEL_WIN_THRESHOLD = {l: 0.70 for l in range(1, 16)}
+
+LEVEL_CHECK_FREQ = {
+    **{l: 50_000  for l in range(1, 4)},
+    **{l: 100_000 for l in range(4, 8)},
+    **{l: 250_000 for l in range(8, 16)},
+}
+
+LEVEL_EVAL_EPS = {l: 20 for l in range(1, 16)}
+
+# Algorithm: PPO for L01–L07, RecurrentPPO for L08–L15
+LEVEL_USE_RECURRENT = {l: l >= 8 for l in range(1, 16)}
+
 # ── PPO hyperparameters ──────────────────────────────────────────────────────
 # Stages 1-2: standard PPO (fast, no LSTM overhead)
 # Stages 3-5: RecurrentPPO with LSTM (better multi-step planning)

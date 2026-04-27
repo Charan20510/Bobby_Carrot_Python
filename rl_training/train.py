@@ -1,6 +1,6 @@
 """Training loop: stage iteration, checkpointing, heartbeat, and resume."""
 from __future__ import annotations
-import gc, glob, math, os, sys, threading, time
+import gc, glob, math, os, sys, threading, time, json
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
@@ -176,3 +176,249 @@ def run_training(drive_dir, device, n_envs):
             heartbeat.stop(); vec_env.close(); gc.collect()
             if torch.cuda.is_available(): torch.cuda.empty_cache()
     print("\n[OK] All training stages complete!")
+
+
+def run_level_training(drive_dir: str, device: str, n_envs: int, level: int):
+    """Train a single level independently (no curriculum pooling).
+
+    Each level gets its own model, checkpoint directory, and step budget.
+    Checkpoint layout:
+        models/level_{NN}/ckpt_*_steps.zip
+        models/level_{NN}/best_model.zip
+        models/level_{NN}_final.zip
+    """
+    from .config import (
+        LEVEL_MAX_STEPS, LEVEL_MAX_EPISODE_STEPS, LEVEL_ENT_COEF,
+        LEVEL_CHECK_FREQ, LEVEL_EVAL_EPS, LEVEL_USE_RECURRENT,
+        LEVEL_WIN_THRESHOLD, LEVEL_MIN_STEPS,
+    )
+    from .wrappers import SingleLevelEnv
+
+    use_recurrent = LEVEL_USE_RECURRENT[level] and _HAS_RECURRENT
+    AlgoCls = RecurrentPPO if use_recurrent else PPO
+    algo_name = "RecurrentPPO" if use_recurrent else "PPO"
+    horizon = LEVEL_MAX_EPISODE_STEPS[level]
+    max_steps = LEVEL_MAX_STEPS[level]
+    ent_coef = LEVEL_ENT_COEF[level]
+    n_env = n_envs
+
+    print(f"\n{'='*65}")
+    print(f"  LEVEL {level:02d}  [{algo_name} x{n_env} envs]  [{device}]")
+    print(f"  budget: {max_steps:,} steps  horizon: {horizon}  ent_coef: {ent_coef}")
+    print(f"{'='*65}")
+
+    final_path = f"{drive_dir}/models/level_{level:02d}_final.zip"
+    if os.path.exists(final_path):
+        print(f"  Already complete ({final_path}). Skipping.")
+        return
+
+    try:
+        sim = simulate_level(level)
+        safe_print(format_simulation(sim))
+    except Exception as exc:
+        safe_print(f"  [simulate_level] L{level:02d} failed: {exc!r}")
+
+    rollout_size = PPO_BASE_KWARGS["n_steps"] * n_env
+    assert rollout_size % PPO_BASE_KWARGS["batch_size"] == 0, (
+        f"rollout buffer ({rollout_size}) not divisible by batch_size "
+        f"({PPO_BASE_KWARGS['batch_size']})"
+    )
+    safe_print(
+        f"  [CONFIG] n_envs={n_env}  n_steps={PPO_BASE_KWARGS['n_steps']}  "
+        f"batch={PPO_BASE_KWARGS['batch_size']}  rollout={rollout_size}  "
+        f"ent_coef={ent_coef}"
+    )
+    
+    start_time = time.time()
+
+    model_dir = f"{drive_dir}/models/level_{level:02d}"
+    os.makedirs(model_dir, exist_ok=True)
+
+    def _make_env(lvl=level, h=horizon):
+        def _init():
+            return SingleLevelEnv(level=lvl, max_episode_steps=h)
+        return _init
+
+    vec_env = VecMonitor(DummyVecEnv([_make_env()] * n_env))
+
+    policy_name = "MultiInputLstmPolicy" if use_recurrent else "MultiInputPolicy"
+    pk = dict(get_policy_kwargs())
+    if use_recurrent:
+        pk.update(RECURRENT_POLICY_KWARGS)
+
+    algo_kwargs = dict(
+        **(RECURRENT_KWARGS if use_recurrent else PPO_BASE_KWARGS),
+        ent_coef=ent_coef,
+        learning_rate=_lr_schedule(1),
+    )
+
+    ckpt_path, ckpt_steps = _find_latest_ckpt(model_dir)
+    resume_steps = 0
+    reset_ts = True
+
+    if ckpt_path:
+        print(f"  [RESUME] {os.path.basename(ckpt_path)}  ({ckpt_steps:,} / {max_steps:,} steps done)")
+        model = AlgoCls.load(
+            ckpt_path, env=vec_env,
+            tensorboard_log=f"{drive_dir}/tb_logs/",
+            device=device, verbose=0,
+        )
+        model.ent_coef = ent_coef
+        model.learning_rate = _lr_schedule(1)
+        resume_steps = ckpt_steps
+        reset_ts = False
+    else:
+        model = AlgoCls(
+            policy_name, vec_env, **algo_kwargs,
+            policy_kwargs=pk,
+            tensorboard_log=f"{drive_dir}/tb_logs/",
+            device=device, verbose=0,
+        )
+
+    tab_cb = TabularLogCallback()
+    win_cb = WinRateCallback(
+        stage=level,
+        eval_levels=[level],
+        n_eval_episodes=LEVEL_EVAL_EPS[level],
+        check_freq=LEVEL_CHECK_FREQ[level],
+        max_eval_steps=500, verbose=1,
+    )
+    win_cb.hardest_level = level
+    win_cb._steps_at_last_check = resume_steps
+    ckpt_cb = CheckpointCallback(
+        save_freq=max(500_000 // n_env, 1),
+        save_path=model_dir, name_prefix="ckpt",
+    )
+    heartbeat = _Heartbeat(model, interval=30.0, stall_warn=120.0)
+    heartbeat.start()
+
+    if resume_steps > 0:
+        print(f"  [resume] firing eval-on-resume (1x) before training...")
+        win_cb.model = model
+        win_cb.num_timesteps = resume_steps
+        win_cb._stage_start = resume_steps - 1
+        try:
+            from sb3_contrib import RecurrentPPO as _RPPO
+            win_cb._is_recurrent = isinstance(model, _RPPO)
+        except ImportError:
+            win_cb._is_recurrent = False
+        win_cb._run_eval()
+
+    progress_cb = StageProgressCallback(stage=level, resume_steps=resume_steps)
+
+    try:
+        model.learn(
+            total_timesteps=max_steps,
+            callback=[tab_cb, win_cb, ckpt_cb, progress_cb],
+            reset_num_timesteps=reset_ts,
+            tb_log_name=f"{algo_name}_L{level:02d}",
+            progress_bar=False,
+        )
+        model.save(f"{drive_dir}/models/level_{level:02d}_final")
+    except KeyboardInterrupt:
+        rescue = os.path.join(
+            model_dir, f"ckpt_interrupt_{model.num_timesteps}_steps.zip")
+        print(f"\n  [INTERRUPT] saving {rescue}")
+        model.save(rescue)
+        raise
+    finally:
+        heartbeat.stop()
+        vec_env.close()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    wall_time_min = (time.time() - start_time) / 60.0
+    
+    # Run post-training evaluation
+    from .evaluate import evaluate_level_model
+    print(f"\n  [EVAL] Running post-training evaluation on Level {level:02d}...")
+    eval_result = evaluate_level_model(drive_dir, level, n_episodes=20, max_steps=500)
+    
+    # Save training log
+    log_data = {
+        "level": level,
+        "algo": algo_name,
+        "total_steps": model.num_timesteps,
+        "wall_time_min": round(wall_time_min, 2),
+        "config": {
+            "ent_coef": ent_coef,
+            "horizon": horizon,
+            "max_steps": max_steps,
+        },
+        "eval": {
+            "win_rate": eval_result["win_rate"],
+            "mean_reward": eval_result["mean_reward"],
+            "mean_steps": eval_result["mean_steps"],
+            "carrot_pct": eval_result["carrot_pct"],
+            "all_carrots_collected": eval_result["all_carrots_collected"],
+            "failure_breakdown": eval_result["failure_breakdown"],
+        }
+    }
+    
+    log_path = f"{model_dir}/training_log.json"
+    with open(log_path, "w") as f:
+        json.dump(log_data, f, indent=2)
+        
+    print(f"\n╔{'═'*58}╗")
+    print(f"║  LEVEL {level:02d} — TRAINING SUMMARY                           ║")
+    print(f"╠{'═'*58}╣")
+    print(f"║  Algorithm   : {algo_name:<13}Total Steps: {model.num_timesteps:<10,}║")
+    print(f"║  Wall Time   : {wall_time_min:<5.1f} min{' '*33}║")
+    print(f"║  Final Win%  : {eval_result['win_rate']:<4.0%}          Mean Steps : {eval_result['mean_steps']:<14.0f}║")
+    print(f"║  Carrot%     : {eval_result['carrot_pct']:<4.0%}          Mean Reward: {eval_result['mean_reward']:<+14.1f}║")
+    
+    pass_status = "PASS" if eval_result['win_rate'] >= 0.70 and eval_result['all_carrots_collected'] else "FAIL"
+    print(f"║  Status      : {pass_status:<44}║")
+    print(f"╚{'═'*58}╝")
+
+    print(f"\n[OK] Level {level:02d} training complete!")
+
+
+def run_all_level_training(drive_dir: str, device: str, n_envs: int):
+    """Train levels 1–15 sequentially, each independently."""
+    from .config import INDIVIDUAL_LEVELS
+    for level in INDIVIDUAL_LEVELS:
+        run_level_training(drive_dir, device, n_envs, level)
+        
+    # Print combined summary table
+    print(f"\n{'═'*75}")
+    print("  PER-LEVEL TRAINING RESULTS (Levels 1–15)")
+    print(f"{'═'*75}")
+    print(f"  Level │ Win% │ Carrot% │  Steps │ Reward │ Status")
+    print("  ──────┼──────┼─────────┼────────┼────────┼────────")
+    
+    passes = 0
+    total = 0
+    avg_win = avg_car = avg_steps = avg_rew = 0.0
+    
+    for l in INDIVIDUAL_LEVELS:
+        log_path = f"{drive_dir}/models/level_{l:02d}/training_log.json"
+        if os.path.exists(log_path):
+            total += 1
+            log = json.load(open(log_path))
+            ev = log.get("eval", {})
+            wr = ev.get("win_rate", 0)
+            car = ev.get("carrot_pct", 0)
+            steps = ev.get("mean_steps", 0)
+            rew = ev.get("mean_reward", 0)
+            
+            avg_win += wr
+            avg_car += car
+            avg_steps += steps
+            avg_rew += rew
+            
+            all_collected = ev.get("all_carrots_collected", car >= 0.999)
+            status = "✓ PASS" if wr >= 0.70 and all_collected else "✗ FAIL"
+            if "PASS" in status: passes += 1
+            
+            print(f"  L{l:02d}   │ {wr:>4.0%} │ {car:>7.0%} │ {steps:>6.0f} │ {rew:>+6.1f} │ {status}")
+        else:
+            print(f"  L{l:02d}   │ {'—':>4} │ {'—':>7} │ {'—':>6} │ {'—':>6} │ not trained")
+            
+    print("  ──────┼──────┼─────────┼────────┼────────┼────────")
+    if total > 0:
+        print(f"  AVG   │ {avg_win/total:>4.0%} │ {avg_car/total:>7.0%} │ {avg_steps/total:>6.0f} │ {avg_rew/total:>+6.1f} │ {passes}/{total} PASS")
+    print(f"{'═'*75}\n")
+
+    print("[OK] All 15 levels complete!")

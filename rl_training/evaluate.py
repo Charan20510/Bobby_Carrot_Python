@@ -129,6 +129,47 @@ def _load_best_model(drive_dir):
     return PPO.load(chosen_path), chosen_path
 
 
+def _load_level_model(drive_dir: str, level: int):
+    """Load the best model for a specific individual level."""
+    import glob
+
+    def _ckpt_step(path: str) -> int:
+        for tok in os.path.basename(path).replace(".zip", "").split("_"):
+            if tok.isdigit():
+                return int(tok)
+        return 0
+
+    chosen_path = None
+    level_dir = f"{drive_dir}/models/level_{level:02d}"
+    
+    for fname in (
+        f"{level_dir}/best_model.zip",
+        f"{level_dir}_final.zip",
+    ):
+        if os.path.exists(fname):
+            chosen_path = fname
+            break
+            
+    if not chosen_path:
+        ckpts = sorted(
+            glob.glob(f"{level_dir}/ckpt_*_steps.zip"),
+            key=_ckpt_step,
+        )
+        if ckpts:
+            chosen_path = ckpts[-1]
+
+    if chosen_path is None:
+        raise FileNotFoundError(f"No trained model found for level {level} in {drive_dir}/models/")
+
+    if RecurrentPPO:
+        try:
+            return RecurrentPPO.load(chosen_path), chosen_path
+        except Exception:
+            pass
+    return PPO.load(chosen_path), chosen_path
+
+
+
 def _classify(total_r, dead, timed_out, carrot_pct, crumble_death=False):
     """Classify episode outcome into a failure mode.
 
@@ -287,3 +328,102 @@ def run_evaluation(
         "avg_reward": avg_r,
         "avg_carrot_pct": avg_cpct,
     }
+
+
+def evaluate_level_model(
+    drive_dir: str,
+    level: int,
+    n_episodes: int = 20,
+    max_steps: int = 500,
+    win_threshold: float = 5.0,
+) -> dict:
+    """Run evaluation for a specific level model on its own level.
+    
+    Returns a dict with win_rate, mean_reward, mean_steps, carrot_pct,
+    all_carrots_collected (bool), and failure_breakdown.
+    """
+    model, model_path = _load_level_model(drive_dir, level)
+    is_recurrent = RecurrentPPO is not None and isinstance(model, RecurrentPPO)
+    
+    wins = deaths = timeouts = 0
+    total_r = total_steps = total_carrot_pct = 0.0
+    mode_counts = {
+        "win": 0, "death_crumble": 0, "death_other": 0,
+        "timeout": 0, "stuck_near_exit": 0, "unwinnable": 0, "unknown": 0,
+    }
+    
+    # Track if *every* winning episode collected 100% of carrots
+    all_carrots_collected_in_wins = True
+    win_count_for_carrot_check = 0
+    
+    for ep in range(n_episodes):
+        env = BobbyCarrotEnv(map_kind="normal", map_number=level)
+        obs, _ = env.reset()
+        ep_r = ep_steps = 0.0
+        dead = timed_out = crumble_death = False
+        lstm_states = None
+        episode_start = np.array([True])
+        
+        while True:
+            if is_recurrent:
+                action, lstm_states = model.predict(
+                    obs, state=lstm_states,
+                    episode_start=episode_start, deterministic=True)
+                episode_start = np.array([False])
+            else:
+                action, _ = model.predict(obs, deterministic=True)
+                
+            obs, r, term, trunc, info = env.step(action)
+            ep_r += r
+            ep_steps += 1
+            
+            if term:
+                dead = (ep_r < win_threshold)
+                evts = info.get("events", []) or []
+                crumble_death = "died_on_crumble" in evts
+                break
+            if trunc or ep_steps >= max_steps:
+                timed_out = True
+                break
+                
+        env_inner = env._env if hasattr(env, "_env") else None
+        gs = getattr(env_inner, "gs", None)
+        if gs:
+            total_ct = max(gs.carrot_total + gs.egg_total, 1)
+            carrot_pct = (gs.carrot_count + gs.egg_count) / total_ct
+        else:
+            carrot_pct = 0.0
+            
+        mode = _classify(ep_r, dead, timed_out, carrot_pct, crumble_death)
+        mode_counts[mode] += 1
+        
+        if mode == "win":
+            wins += 1
+            win_count_for_carrot_check += 1
+            if carrot_pct < 0.999:  # Allow floating point slop
+                all_carrots_collected_in_wins = False
+        elif mode in ("death_crumble", "death_other"):
+            deaths += 1
+        elif mode in ("timeout", "stuck_near_exit", "unwinnable"):
+            timeouts += 1
+            
+        total_r += ep_r
+        total_steps += ep_steps
+        total_carrot_pct += carrot_pct
+        env.close()
+        
+    wr = wins / n_episodes
+    if win_count_for_carrot_check == 0:
+        all_carrots_collected_in_wins = False
+        
+    return {
+        "model_path": model_path,
+        "is_recurrent": is_recurrent,
+        "win_rate": wr,
+        "mean_reward": total_r / n_episodes,
+        "mean_steps": total_steps / n_episodes,
+        "carrot_pct": total_carrot_pct / n_episodes,
+        "all_carrots_collected": all_carrots_collected_in_wins,
+        "failure_breakdown": dict(mode_counts)
+    }
+

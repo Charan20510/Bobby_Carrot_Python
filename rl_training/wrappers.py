@@ -323,3 +323,47 @@ class CurriculumEnv(gym.Env):
             env.close()
         self._env_cache.clear()
         self._env = None
+
+
+class SingleLevelEnv(gym.Env):
+    """Fixed single-level environment for per-level training.
+
+    Unlike CurriculumEnv (which samples from a pool with inverse-win-rate
+    weighting), this always resets to the same level.  Used by
+    ``run_level_training()`` for independent per-level model training.
+    """
+    metadata = {"render_modes": [None]}
+
+    def __init__(self, level: int, max_episode_steps: int = 500):
+        super().__init__()
+        self.level = level
+        self.max_episode_steps = max_episode_steps
+
+        _dummy = BobbyCarrotEnv(map_kind="normal", map_number=level)
+        self.observation_space = _dummy.observation_space
+        self.action_space      = _dummy.action_space
+        _dummy.close()
+
+        self._env: Optional[RewardShapingWrapper] = None
+        self._step_count = 0
+
+    def reset(self, **kwargs):
+        if self._env is not None:
+            self._env.close()
+        base = BobbyCarrotEnv(map_kind="normal", map_number=self.level)
+        self._env = RewardShapingWrapper(
+            base, max_episode_steps=self.max_episode_steps)
+        self._step_count = 0
+        return self._env.reset(**kwargs)
+
+    def step(self, action):
+        self._step_count += 1
+        obs, reward, terminated, truncated, info = self._env.step(action)
+        if self._step_count >= self.max_episode_steps:
+            truncated = True
+        return obs, reward, terminated, truncated, info
+
+    def close(self):
+        if self._env is not None:
+            self._env.close()
+            self._env = None

@@ -29,17 +29,27 @@ from .config import (
     RECURRENT_KWARGS,
     get_n_envs,
     get_policy_kwargs,
+    INDIVIDUAL_LEVELS,
+    LEVEL_MIN_STEPS,
+    LEVEL_MAX_STEPS,
+    LEVEL_MAX_EPISODE_STEPS,
+    LEVEL_ENT_COEF,
+    LEVEL_WIN_THRESHOLD,
+    LEVEL_CHECK_FREQ,
+    LEVEL_EVAL_EPS,
+    LEVEL_USE_RECURRENT,
 )
 from .potential import compute_potential, bfs_to_exit
 
 # Gymnasium wrappers — require gymnasium + bobby_carrot but NOT stable_baselines3
 try:
-    from .wrappers import RewardShapingWrapper, CurriculumEnv
+    from .wrappers import RewardShapingWrapper, CurriculumEnv, SingleLevelEnv
 except ImportError:
     pass
 
 # SB3-dependent modules — lazy import; these fail without stable_baselines3
 # Import them directly: from rl_training.extractor import BobbyExtractor
 # from rl_training.callbacks import TabularLogCallback, WinRateCallback
-# from rl_training.train import run_training
+# from rl_training.train import run_training, run_level_training
 # from rl_training.evaluate import run_evaluation
+

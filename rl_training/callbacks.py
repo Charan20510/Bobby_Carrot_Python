@@ -406,8 +406,13 @@ class WinRateCallback(BaseCallback):
                         )
 
             hardest_wr = results[self.hardest_level]["win_rate"]
-            threshold  = STAGE_WIN_THRESHOLD[self.stage]
-            min_steps  = STAGE_MIN_STEPS[self.stage]
+            threshold  = STAGE_WIN_THRESHOLD.get(self.stage)
+            if threshold is None:
+                from .config import LEVEL_WIN_THRESHOLD, LEVEL_MIN_STEPS
+                threshold = LEVEL_WIN_THRESHOLD[self.stage]
+                min_steps = LEVEL_MIN_STEPS[self.stage]
+            else:
+                min_steps = STAGE_MIN_STEPS[self.stage]
             stage_steps = self._stage_steps()
             promote_now = hardest_wr >= threshold and stage_steps >= min_steps
 
@@ -539,7 +544,10 @@ class StageProgressCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         self._stage_start = self.num_timesteps
-        max_steps = STAGE_MAX_STEPS[self.stage]
+        max_steps = STAGE_MAX_STEPS.get(self.stage)
+        if max_steps is None:
+            from .config import LEVEL_MAX_STEPS
+            max_steps = LEVEL_MAX_STEPS[self.stage]
         initial = self._resume_steps
         self._pbar = tqdm(
             total=max_steps,

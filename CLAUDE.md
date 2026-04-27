@@ -68,7 +68,8 @@ rl_training/                   PPO training stack (extracted from the notebook)
 ├── callbacks.py    TabularLogCallback, WinRateCallback, StageProgressCallback, safe_print.
 ├── train.py        run_training: 5-stage loop with checkpoint resume, heartbeat, warm-start.
 ├── evaluate.py     run_evaluation: held-out per-level metrics with failure-mode classification.
-└── evaluate_gui.py CLI tool: Pygame rendering, frame-saving, batch report (importable too).
+├── evaluate_gui.py CLI tool: Pygame rendering, frame-saving, batch report (importable too).
+└── audit_rewards.py Random-policy reward-magnitude audit; asserts |step| < |carrot| < |win|/3.
 ```
 
 `rl_training/__init__.py` re-exports config + potential eagerly and `wrappers` if `gymnasium` is available; `extractor`, `callbacks`, `train`, `evaluate` require `stable_baselines3` / `sb3_contrib` and are imported lazily so the package can be loaded in environments without SB3.
@@ -116,6 +117,20 @@ Curriculum stages (`rl_training/config.py::STAGE_ALL_LEVELS`):
 | 3     | L01–L12 | + Directional conveyors               |
 | 4     | L01–L17 | + Red/Yellow switches                 |
 | 5     | L01–L25 | + Keys/Locks, full mix                |
+
+### Per-level training (alternative mode)
+
+Independent per-level training for levels 1–15, one model per level:
+
+```bash
+# Train a single level
+python -c "from rl_training.train import run_level_training; run_level_training('.', 'cuda', 8, level=5)"
+
+# Train all 15 sequentially
+python -c "from rl_training.train import run_all_level_training; run_all_level_training('.', 'cuda', 8)"
+```
+
+Per-level config lives in `LEVEL_*` dicts in `config.py` (parallel to `STAGE_*`). Checkpoint layout: `models/level_{NN}/ckpt_*_steps.zip`, `models/level_{NN}/best_model.zip`, `models/level_{NN}_final.zip`. The `SingleLevelEnv` wrapper in `wrappers.py` fixes a single level (vs `CurriculumEnv` which samples from a pool). Algorithm: PPO for L01–L07, RecurrentPPO for L08–L15 (`LEVEL_USE_RECURRENT` in `config.py`).
 
 ## Coding standards
 
